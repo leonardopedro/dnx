@@ -6,3 +6,8 @@ edition.workspace = true
 [dependencies]
 dnx-core = { path = "../dnx-core" }
 rayon = "1"
+
+[dev-dependencies]
+dnx-elab = { path = "../dnx-elab" }
+dnx-oracle = { path = "../dnx-oracle" }
+proptest = "1"

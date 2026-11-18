@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 55a8c3e158062c40b274b1a9a78fb0ebeda39489f8090460e071bf3edc699bb1 # shrinks to term = Abs("g0", App(Abs("g1", Name("g1")), App(Abs("g2", Name("g2")), Name("g0"))))

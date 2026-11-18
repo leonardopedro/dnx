@@ -453,6 +453,7 @@ dependencies = [
  "blake3",
  "dnx-ast",
  "dnx-elab",
+ "dnx-oracle",
  "dnx-read",
  "proptest",
  "rayon",
@@ -531,6 +532,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dnx-oracle"
+version = "0.1.0"
+dependencies = [
+ "dnx-ast",
+ "proptest",
+]
+
+[[package]]
 name = "dnx-prim"
 version = "0.1.0"
 dependencies = [
@@ -577,6 +586,9 @@ name = "dnx-sched"
 version = "0.1.0"
 dependencies = [
  "dnx-core",
+ "dnx-elab",
+ "dnx-oracle",
+ "proptest",
  "rayon",
 ]
 
