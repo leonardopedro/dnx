@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 9864fef7a0fc861a001ba11ee5a44f2d851caa2563b935c38f32adc36b4af611 # shrinks to db = Abs(Abs(Var(0)))
+cc e3efff3659e025f5a1d52c23b74836163e4da6af7f6a4560ece3bd1151f69977 # shrinks to term = Abs("g0", App(App(Abs("g1", App(Abs("g2", Name("g2")), Name("g1"))), Abs("g3", Abs("g4", App(Name("g0"), App(Name("g3"), Name("g4")))))), Abs("g5", Name("g5"))))

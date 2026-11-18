@@ -405,11 +405,18 @@ fn build(
     tape: &mut impl Iterator<Item = bool>,
 ) -> E {
     match vars.len() {
-        // Nothing to consume: only an Abs (which binds and uses its variable)
-        // keeps the term linear and closed. This adds no free variables.
-        0 => {
+        // Nothing to consume: the subterm must be closed, so the only admissable
+        // shape is an Abs that binds a fresh variable and uses it in its body.
+        // With budget left the body is built with that variable pending (so real
+        // structure appears); at zero budget it is the linear identity.
+        0 if budget == 0 => {
             let f = fresh_name(fresh);
             Ast::Abs(f.clone(), Box::new(Ast::Name(f)))
+        }
+        0 => {
+            let f = fresh_name(fresh);
+            let body = build(&mut vec![f.clone()], fresh, budget - 1, tape);
+            Ast::Abs(f, Box::new(body))
         }
         // One variable left and no budget: it must be consumed as a leaf.
         1 if budget == 0 => Ast::Name(vars.pop().expect("one variable")),
@@ -465,7 +472,7 @@ proptest! {
     /// dnx-normalize ≡ ref-normalize on every generated LINEAR closed term that
     /// has a normal form. This is the A1 (φ_S-idempotency) differential oracle.
     #[test]
-    fn dnx_normalize_eq_ref_normalize(term in gen_term(6)) {
+    fn dnx_normalize_eq_ref_normalize(term in gen_term(8)) {
         match agree(&term) {
             Ok(_) => {}                         // agreed, or ref had no NF (skipped)
             Err(msg) => prop_assert!(false, "{}", msg),

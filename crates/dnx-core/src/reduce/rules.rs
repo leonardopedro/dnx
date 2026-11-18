@@ -56,11 +56,20 @@ pub(crate) fn r4_fan_fan<C: NetClassMarker>(
     let arg_peer = PortId::from_raw(app.aux1);
     net.retire(abs_p.slot_idx());
     net.retire(app_p.slot_idx());
-    // Identity self-loop: body and var are both ports of the just-retired abs.
-    // Wire result↔arg directly. Use link_no_pair to avoid spurious active pair
-    // when result is a root Free slot and arg is a FanAbs principal.
+    // Identity self-loop: body and var are the same wire, so result and argument
+    // are wired directly. The wire is skipped by pair detection only when an end
+    // is a whole free slot (variable/root): that pair is a wire endpoint, not a
+    // redex. When both ends are agent principals it IS a redex (e.g. the result
+    // continuation is an outer App awaiting the identity's argument, as in
+    // `(I X) I`), and dropping the registration would leave it unreduced.
     if body_peer.slot_idx() == abs_p.slot_idx() && var_peer.slot_idx() == abs_p.slot_idx() {
-        net.link_no_pair(res_peer, arg_peer);
+        let is_agent_principal =
+            |p: PortId| !p.is_eraser() && !p.is_null() && !net.slot(p).is_free();
+        if is_agent_principal(res_peer) && is_agent_principal(arg_peer) {
+            net.connect(res_peer, arg_peer, lo.extend_left()?)?;
+        } else {
+            net.link_no_pair(res_peer, arg_peer);
+        }
     } else {
         net.connect(body_peer, res_peer, lo.extend_left()?)?;
         net.connect(var_peer, arg_peer, lo.extend_right()?)?;

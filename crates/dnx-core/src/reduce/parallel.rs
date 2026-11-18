@@ -174,11 +174,15 @@ pub fn normalize_parallel<C: CRules>(
             let used = out.new_agents.len() as u32;
             let base = bases[i];
             let max = MAX_NEW as u32;
-            // R4 (β): 2 retirements, no new agents, no erasers, 2 connects XOR link_direct.
+            // R4 (β): 2 retirements, no new agents, no erasers, and either 2
+            // connects (cross-wire), 1 connect (identity shortcut whose wire the
+            // coordinator registers because both ends are agent principals), or a
+            // direct link (identity shortcut ending in a free slot).
             let is_r4 = out.new_agents.is_empty()
                 && out.set_erasers.is_empty()
                 && out.retired.len() == 2
                 && ((out.connects.len() == 2 && out.link_direct.is_none())
+                    || (out.connects.len() == 1 && out.link_direct.is_none())
                     || (out.connects.is_empty() && out.link_direct.is_some()));
             if is_r4 {
                 stats.r4_count += 1;
@@ -362,7 +366,17 @@ fn fire_rule_parallel_arena<C: CRules>(
             out.retire(abs_p.slot_idx());
             out.retire(app_p.slot_idx());
             if body_peer.slot_idx() == abs_p.slot_idx() && var_peer.slot_idx() == abs_p.slot_idx() {
-                out.link_direct = Some((res_peer, arg_peer));
+                // Same identity shortcut as `r4_fan_fan`: skip pair detection only
+                // when an end is a whole free slot; two agent principals are a
+                // redex the coordinator must register or it never fires.
+                let is_agent_principal = |p: PortId| {
+                    !p.is_eraser() && !p.is_null() && !arena.slot(p.slot_idx()).is_free()
+                };
+                if is_agent_principal(res_peer) && is_agent_principal(arg_peer) {
+                    out.connect(res_peer, arg_peer, lo.extend_left()?);
+                } else {
+                    out.link_direct = Some((res_peer, arg_peer));
+                }
             } else {
                 out.connect(body_peer, res_peer, lo.extend_left()?);
                 out.connect(var_peer, arg_peer, lo.extend_right()?);
