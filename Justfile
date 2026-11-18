@@ -33,6 +33,7 @@ oracle:
   @cargo test --test oracle -- --include-ignored
   @cargo test -p dnx-sched --test parallel_equiv -- --include-ignored
   @cargo test -p dnx-sched --test whnf_oracle -- --include-ignored
+  @cargo test -p dnx-sched --test parallel_fuzz
   @cargo test -p dnx-read --test oracle -- --include-ignored
 
 # The import-tree gate: run a nix-unit-style suite through dnx's PARALLEL runner.

@@ -5,6 +5,10 @@
 //!
 //! The generator and reference normalizer live in `dnx-oracle` so this crate and
 //! `dnx-core`'s refnorm oracle fuzz exactly the same fragment.
+//!
+//! The defaults (300 cases, budget 6) are what CI runs. Deeper passes are opt-in
+//! without editing this file:
+//! `DNX_FUZZ_CASES=2000 DNX_FUZZ_BUDGET=7 cargo test -p dnx-sched --test parallel_fuzz`.
 
 use dnx_core::{canonical_hash, LOPath, Net, PortId, PortKind, Proper, ΔL};
 use dnx_oracle::{gen_term, ref_nf, LinearTerm, RefErr};
@@ -50,11 +54,25 @@ fn root_hash(net: &dnx_core::Net<dnx_core::Canonical, ΔL>) -> [u8; 32] {
     canonical_hash(net, root).expect("canonical_hash on a pure NF")
 }
 
+/// A knob with a CI default; an unparseable value falls back rather than panicking
+/// mid-fuzz.
+fn tuned(key: &str, default: u32) -> u32 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 300, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig {
+        cases: tuned("DNX_FUZZ_CASES", 300),
+        ..ProptestConfig::default()
+    })]
 
     #[test]
-    fn parallel_matches_sequential_on_generated_terms(term in gen_term(6)) {
+    fn parallel_matches_sequential_on_generated_terms(
+        term in gen_term(tuned("DNX_FUZZ_BUDGET", 6))
+    ) {
         // A term with no NF would drive the net forever; the reference decides.
         if matches!(ref_nf(&term), Err(RefErr::Diverged)) {
             return Ok(());
