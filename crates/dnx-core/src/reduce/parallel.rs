@@ -16,6 +16,7 @@ use crate::reduce::ReduceStats;
 use crate::slot::{Slot, TAG_FAN_ABS, TAG_FAN_APP, TAG_REP_IN_UNKNOWN, TAG_REP_OUT_UNKNOWN};
 use crate::{Canonical, DnxError, LOPath, PortId, PortKind, Proper};
 use rayon::prelude::*;
+use std::collections::HashSet;
 
 // Each rule produces at most 4 new agents (R5: 2 fans + 2 reps; R7: 4 reps).
 const MAX_NEW: usize = 4;
@@ -80,6 +81,33 @@ impl WorkerOutput {
     fn era(&mut self, p: PortId) {
         self.set_erasers.push(p);
     }
+}
+
+/// Slots a worker output writes: retired agents, newly committed agents, and both
+/// ends of every wire (wiring a port updates that port's field), plus the ports
+/// eraser propagation marks. Two outputs sharing any of these cannot be applied
+/// from the same pre-batch snapshot.
+fn touched_slots(out: &WorkerOutput, base: u32) -> Vec<u32> {
+    let mut slots: Vec<u32> = Vec::with_capacity(out.retired.len() + out.new_agents.len() + 16);
+    slots.extend(out.retired.iter().copied());
+    slots.extend(base..base + out.new_agents.len() as u32);
+    let push_port = |p: PortId, slots: &mut Vec<u32>| {
+        if !p.is_eraser() && !p.is_null() {
+            slots.push(p.slot_idx());
+        }
+    };
+    for (a, b, _) in &out.connects {
+        push_port(*a, &mut slots);
+        push_port(*b, &mut slots);
+    }
+    if let Some((a, b)) = out.link_direct {
+        push_port(a, &mut slots);
+        push_port(b, &mut slots);
+    }
+    for p in &out.set_erasers {
+        push_port(*p, &mut slots);
+    }
+    slots
 }
 
 fn apply_output<C: CRules>(
@@ -168,12 +196,26 @@ pub fn normalize_parallel<C: CRules>(
                 .collect()
         });
 
-        // Coordinator: apply outputs sequentially.
+        // Coordinator: apply outputs sequentially. Pairs are only as independent
+        // as their WRITE SETS: two distinct redexes can share a surviving agent's
+        // aux port (outer β's result continuation is an inner App's aux0, which
+        // the inner β also rewires), and applying both from one snapshot loses a
+        // wire. A pair whose write set overlaps an already-applied one is put
+        // back on the frontier and reconsidered next round, from fresh wires.
+        let mut written: HashSet<u32> = HashSet::new();
+        let mut deferred: Vec<ActivePair> = Vec::new();
         for (i, res) in outputs.into_iter().enumerate() {
             let out = res?;
             let used = out.new_agents.len() as u32;
             let base = bases[i];
             let max = MAX_NEW as u32;
+            let touched = touched_slots(&out, base);
+            if touched.iter().any(|s| written.contains(s)) {
+                net.arena.release_reserved(base, 0, max);
+                deferred.push(batch[i].clone());
+                continue;
+            }
+            written.extend(touched);
             // R4 (β): 2 retirements, no new agents, no erasers, and either 2
             // connects (cross-wire), 1 connect (identity shortcut whose wire the
             // coordinator registers because both ends are agent principals), or a
@@ -193,6 +235,11 @@ pub fn normalize_parallel<C: CRules>(
             apply_output(&mut net, out, base)?;
             // Release unused reserved slots.
             net.arena.release_reserved(base, used, max);
+        }
+        // Re-queue deferred pairs. The first output of a round is never deferred,
+        // so every non-empty batch makes progress.
+        for pair in deferred {
+            net.frontier1.entry(pair.lo.clone()).or_insert(pair);
         }
     }
 
