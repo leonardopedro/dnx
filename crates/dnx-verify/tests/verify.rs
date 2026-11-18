@@ -278,6 +278,25 @@ fn cli_batch_aggregates_exit_codes() {
 }
 
 #[test]
+fn committed_precedence_manifest_reports_the_expected_mismatch() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let pairs = load_manifest(&dir.join("precedence.json")).unwrap();
+    assert_eq!(pairs.len(), 1);
+    match &check_pairs(&pairs, &dir)[0].verdict {
+        Ok(Verdict::Different { left, right }) => {
+            assert_eq!(left.value.as_deref(), Some("7"), "Nix binds * before +");
+            assert_eq!(
+                right.value.as_deref(),
+                Some("9"),
+                "the AustralVM parser groups left to right"
+            );
+            assert_ne!(left.hash, right.hash);
+        }
+        other => panic!("the precedence fixture must stay a mismatch, got {other:?}"),
+    }
+}
+
+#[test]
 fn committed_examples_manifest_passes() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
     let pairs = load_manifest(&dir.join("pairs.json")).unwrap();

@@ -19,6 +19,11 @@ docs-build:
 test:
   @cargo test
 
+# Scan DIR into DIR/pairs.json and check it (`just scan DIR no` skips the check).
+scan DIR='.' CHECK='yes':
+  @cargo run -q -p dnx-verify -- scan --dir {{DIR}}
+  @if [ "{{CHECK}}" = "no" ]; then echo "manifest {{DIR}}/pairs.json written, not checked"; else just verify-examples "{{DIR}}/pairs.json"; fi
+
 # Verify the Nix/AustralVM example pairs in a batch manifest (default: the
 # in-fragment examples shipped with dnx-verify).
 verify-examples MANIFEST='crates/dnx-verify/examples/pairs.json':

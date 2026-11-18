@@ -1,0 +1,5 @@
+{
+  "pairs": [
+    { "name": "precedence", "nix": "precedence.nix", "austral": "Precedence.aum" }
+  ]
+}

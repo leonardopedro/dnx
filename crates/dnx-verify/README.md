@@ -63,6 +63,22 @@ $ just verify-examples
 4 pair(s): 4 equivalent, 0 different, 0 error(s)
 ```
 
+The examples folder also keeps one deliberately wrong translation in its own
+manifest, `examples/precedence.json`:
+
+```
+$ dnx-verify check --manifest crates/dnx-verify/examples/precedence.json
+[fail]   precedence               different   nix=bf20e9c9...7cb2 austral=7fbc9534...67cc
+1 pair(s): 0 equivalent, 1 different, 0 error(s)     # exit 1
+```
+
+Nix binds `*` before `+`, so `1 + 2 * 3` is 7, while the AustralVM expression
+parser groups left to right and reads the same text as `(1 + 2) * 3` — 9.
+`--json` reports both values. This is the schoolbook failure the tool exists to
+catch, kept out of `examples/pairs.json` because that manifest is what
+`just verify-examples` and CI require to pass; a caught failure is a fixture,
+not a passing example.
+
 `--json` emits one object with a `pairs` array and a `summary`. Batch exit
 status aggregates: `2` if any pair could not be compared, else `1` if any pair
 differs, else `0`. Unreadable or malformed manifests are exit `2` before any
@@ -91,11 +107,18 @@ $ cat translations/pairs.json
 
 Files without a counterpart are reported on stderr (`unpaired …`) but do not
 stop the scan; two Nix entry points for one module stay unpaired rather than one
-being guessed. A folder with no pairs at all is exit `2` and writes nothing.
-`--output PATH` writes elsewhere (paths become relative to the manifest's new
+being guessed. A folder with no pairs at all is exit `2` and writes nothing.`--output PATH` writes elsewhere (paths become relative to the manifest's new
 directory), and `--output -` prints the manifest to stdout with paths relative
 to the working directory. The result is directly usable with
-`check --manifest`, so`dnx-verify scan --dir out && just verify-examples out/pairs.json` is the whole loop.
+`check --manifest`, so `dnx-verify scan --dir out && just verify-examples out/pairs.json` is the whole loop — or in one step:
+
+```bash
+$ just scan out                  # scan, then check every pair
+$ just scan out no               # only write out/pairs.json
+```
+
+`just scan`'s arguments are positional; `just scan out CHECK=no` would be read
+by `just` as a variable override, not as the recipe's second argument.
 
 ## Structural checks over entities
 
@@ -217,7 +240,8 @@ cargo test -p dnx-verify
 ```
 
 Covered: closed arithmetic equivalence, expression-vs-literal normal forms,
-booleans, floats, a genuine mismatch, unsupported strings, module `main`
+booleans, floats, a genuine mismatch, the committed precedence fixture staying
+a mismatch (Nix 7 vs AustralVM 9), unsupported strings, module `main`
 comparison, hash stability, manifest parsing/aggregation (including CLI exit
 codes), entity-bearing structural checks (including entity-name mismatches and
 the CLI's `entities=` output), folder scanning plus a generated manifest that
