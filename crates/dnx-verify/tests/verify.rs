@@ -1,5 +1,6 @@
 use dnx_verify::{
-    austral_check, austral_side, check, check_pairs, load_manifest, nix_side, Verdict, VerifyError,
+    austral_check, austral_side, check, check_pairs, load_manifest, nix_side, Expected, Verdict,
+    VerifyError,
 };
 use logos::deltanet::{unf_hash_string, AgentKind, Net as KernelNet, Port};
 use std::path::{Path, PathBuf};
@@ -278,11 +279,17 @@ fn cli_batch_aggregates_exit_codes() {
 }
 
 #[test]
-fn committed_precedence_manifest_reports_the_expected_mismatch() {
+fn committed_precedence_pair_reports_the_expected_mismatch() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-    let pairs = load_manifest(&dir.join("precedence.json")).unwrap();
-    assert_eq!(pairs.len(), 1);
-    match &check_pairs(&pairs, &dir)[0].verdict {
+    let pairs = load_manifest(&dir.join("pairs.json")).unwrap();
+    let reports = check_pairs(&pairs, &dir);
+    let precedence = reports
+        .iter()
+        .find(|report| report.name == "precedence")
+        .expect("the precedence fixture is in the example manifest");
+    assert_eq!(precedence.expected, Some(Expected::Different));
+    assert!(precedence.passed(), "a declared difference is a pass");
+    match &precedence.verdict {
         Ok(Verdict::Different { left, right }) => {
             assert_eq!(left.value.as_deref(), Some("7"), "Nix binds * before +");
             assert_eq!(
@@ -300,15 +307,137 @@ fn committed_precedence_manifest_reports_the_expected_mismatch() {
 fn committed_examples_manifest_passes() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
     let pairs = load_manifest(&dir.join("pairs.json")).unwrap();
+    assert_eq!(pairs.len(), 5);
     let reports = check_pairs(&pairs, &dir);
+    let different = reports
+        .iter()
+        .filter(|report| matches!(&report.verdict, Ok(Verdict::Different { .. })))
+        .count();
+    assert_eq!(different, 1, "only the precedence pair is a mismatch");
     for report in &reports {
         assert!(
-            matches!(&report.verdict, Ok(Verdict::Equivalent { .. })),
-            "{}: {:?}",
+            report.passed(),
+            "{}: expected {:?}, got {:?}",
             report.name,
+            report.expected,
             report.verdict
         );
     }
+}
+
+#[test]
+fn expected_mismatch_makes_the_batch_pass() {
+    let dir = pair_dir("expect-different", "2 + 3", "(2 + 4)");
+    let manifest = write_manifest(
+        &dir,
+        r#"[{"nix":"pair.nix","austral":"Pair.aum","expect":"different"}]"#,
+    );
+    let pairs = load_manifest(&manifest).unwrap();
+    assert_eq!(pairs[0].expect.as_deref(), Some("different"));
+    assert!(check_pairs(&pairs, &dir)[0].passed());
+
+    let bin = env!("CARGO_BIN_EXE_dnx-verify");
+    let output = std::process::Command::new(bin)
+        .args(["check", "--manifest", manifest.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("different") && stdout.contains("(expected)"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("expectations met"), "{stdout}");
+}
+
+#[test]
+fn unmet_expectations_fail_the_batch() {
+    let dir = pair_dir("expect-unmet", "2 + 3", "(2 + 4)");
+    let bin = env!("CARGO_BIN_EXE_dnx-verify");
+
+    // A pair declared equivalent that differs is a failure.
+    let expects_same = write_manifest(
+        &dir,
+        r#"[{"nix":"pair.nix","austral":"Pair.aum","expect":"equivalent"}]"#,
+    );
+    let output = std::process::Command::new(bin)
+        .args(["check", "--manifest", expects_same.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[fail]"), "{stdout}");
+    assert!(stdout.contains("(expected equivalent)"), "{stdout}");
+    assert!(stdout.contains("1 unexpected"), "{stdout}");
+
+    // A pair declared different that matches exactly is also a failure.
+    std::fs::write(dir.join("Pair.aum"), "(2 + 3)").unwrap();
+    let expects_diff = write_manifest(
+        &dir,
+        r#"[{"nix":"pair.nix","austral":"Pair.aum","expect":"different"}]"#,
+    );
+    let output = std::process::Command::new(bin)
+        .args(["check", "--manifest", expects_diff.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[fail]"), "{stdout}");
+    assert!(stdout.contains("(expected different)"), "{stdout}");
+}
+
+#[test]
+fn unknown_expectation_is_a_manifest_error() {
+    let dir = pair_dir("expect-unknown", "1", "1");
+    let manifest = write_manifest(
+        &dir,
+        r#"[{"nix":"pair.nix","austral":"Pair.aum","expect":"maybe"}]"#,
+    );
+    let err = load_manifest(&manifest).unwrap_err();
+    assert!(err.contains("unknown `expect`"), "{err}");
+
+    let bin = env!("CARGO_BIN_EXE_dnx-verify");
+    let output = std::process::Command::new(bin)
+        .args(["check", "--manifest", manifest.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+}
+
+#[test]
+fn scan_regeneration_preserves_recorded_expectations() {
+    use dnx_verify::{manifest_json, manifest_json_preserving, scan_dir};
+
+    let dir = std::env::temp_dir().join(format!("dnx-verify-expect-scan-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("one.nix"), "2 + 3").unwrap();
+    std::fs::write(dir.join("one.aum"), "(2 + 4)").unwrap();
+    let manifest = write_manifest(
+        &dir,
+        r#"[{"name":"one","nix":"one.nix","austral":"one.aum","expect":"different"}]"#,
+    );
+
+    let report = scan_dir(&dir).unwrap();
+    std::fs::write(
+        &manifest,
+        manifest_json_preserving(&report.pairs, &dir, &manifest),
+    )
+    .unwrap();
+    let regenerated = load_manifest(&manifest).unwrap();
+    assert_eq!(regenerated[0].expect.as_deref(), Some("different"));
+    assert!(check_pairs(&regenerated, &dir)[0].passed());
+
+    // A plain regeneration does not invent expectations.
+    let plain: Vec<serde_json::Value> =
+        serde_json::from_str::<serde_json::Value>(&manifest_json(&report.pairs, &dir))
+            .unwrap()
+            .get("pairs")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone();
+    assert!(plain[0].get("expect").is_none());
 }
 
 #[test]

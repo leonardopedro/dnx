@@ -12,11 +12,12 @@
 //! ```
 //!
 //! Exit status: 0 equivalent, 1 not equivalent, 2 could not compare. In batch
-//! mode the status aggregates: any error is 2, else any mismatch is 1.
+//! mode the status aggregates: any error is 2, else any pair that misses the
+//! verdict its manifest requires is 1.
 
 use dnx_verify::{
-    austral_check, austral_side, check, check_pairs, load_manifest, manifest_json, nix_side,
-    scan_dir, PairReport, Side, Verdict, VerifyError,
+    austral_check, austral_side, check, check_pairs, load_manifest, manifest_json,
+    manifest_json_preserving, nix_side, scan_dir, Expected, PairReport, Side, Verdict, VerifyError,
 };
 use std::process::ExitCode;
 
@@ -30,7 +31,8 @@ usage: dnx-verify check (--nix EXPR | --nix-file PATH) (--austral SRC | --austra
 
 check          reduce both sides to DeltaNet normal forms and compare their
                canonical UNF digests (SHA-256, shared kernel serializer)
-               with --manifest: check every pair it lists (see README)
+               with --manifest: check every pair it lists (see README); a
+               pair's optional `expect` field records its required verdict
 austral-check  compare two AustralVM sources structurally, including nets
                that still contain Entity names (a translation against a
                reference module)
@@ -41,7 +43,8 @@ scan           pair `foo.nix` with `foo.aum` by path stem under DIR and write
                it, paths relative to the working directory)
 
 Exit status: 0 equivalent, 1 not equivalent, 2 could not compare.
-In batch mode: 2 if any pair could not be compared, else 1 if any differs.
+In batch mode: 2 if any pair could not be compared, else 1 if any pair misses
+its expected verdict (with no `expect`, an equivalent verdict is expected).
 The comparison is over the closed fragment shared by both encodings; an
 unconvertible Nix net is reported as 'unsupported', never as a mismatch.";
 
@@ -286,7 +289,7 @@ fn cmd_scan(flags: Flags) -> Result<ExitCode, String> {
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| std::path::Path::new("."));
-        let text = manifest_json(&report.pairs, base);
+        let text = manifest_json_preserving(&report.pairs, base, output_path);
         std::fs::write(output_path, format!("{text}\n"))
             .map_err(|e| format!("write {output}: {e}"))?;
         println!("wrote {} pair(s) to {output}", report.pairs.len());
@@ -390,18 +393,26 @@ fn cmd_manifest(path: &str, json: bool) -> Result<ExitCode, String> {
     let mut equivalent = 0usize;
     let mut different = 0usize;
     let mut errors = 0usize;
+    let mut declared = 0usize;
+    let mut unexpected = 0usize;
     for report in &reports {
         match &report.verdict {
             Ok(Verdict::Equivalent { .. }) => equivalent += 1,
             Ok(Verdict::Different { .. }) => different += 1,
             Err(_) => errors += 1,
         }
+        if report.expected.is_some() {
+            declared += 1;
+            if report.is_unexpected() {
+                unexpected += 1;
+            }
+        }
     }
 
     if json {
         let entries: Vec<String> = reports.iter().map(json_report).collect();
         println!(
-            "{{\"pairs\":[{}],\"summary\":{{\"total\":{},\"equivalent\":{},\"different\":{},\"error\":{}}}}}",
+            "{{\"pairs\":[{}],\"summary\":{{\"total\":{},\"equivalent\":{},\"different\":{},\"error\":{},\"declared\":{declared},\"unexpected\":{unexpected}}}}}",
             entries.join(","),
             reports.len(),
             equivalent,
@@ -412,59 +423,87 @@ fn cmd_manifest(path: &str, json: bool) -> Result<ExitCode, String> {
         for report in &reports {
             print_report(report);
         }
-        println!(
+        let mut line = format!(
             "{} pair(s): {equivalent} equivalent, {different} different, {errors} error(s)",
             reports.len()
         );
+        if declared > 0 {
+            if unexpected > 0 {
+                line.push_str(&format!("; {unexpected} unexpected"));
+            } else {
+                line.push_str("; expectations met");
+            }
+        }
+        println!("{line}");
     }
 
     Ok(if errors > 0 {
         ExitCode::from(2)
-    } else if different > 0 {
-        ExitCode::from(1)
-    } else {
+    } else if reports.iter().all(|report| report.passed()) {
         ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
     })
 }
 
 fn print_report(report: &PairReport) {
     let name = &report.name;
+    let label = if report.passed() { "[ok]" } else { "[fail]" };
     match &report.verdict {
         Ok(Verdict::Equivalent {
             left,
             witness_pairs,
             ..
-        }) => println!(
-            "[ok]     {name:<24} equivalent  {}  witness={witness_pairs}",
-            left.hash
-        ),
-        Ok(Verdict::Different { left, right }) => println!(
-            "[fail]   {name:<24} different   nix={} austral={}",
-            left.hash, right.hash
-        ),
+        }) => {
+            let note = match report.expected {
+                Some(Expected::Different) => "  (expected different)",
+                _ => "",
+            };
+            println!(
+                "{label:<9}{name:<24} equivalent  {}  witness={witness_pairs}{note}",
+                left.hash
+            );
+        }
+        Ok(Verdict::Different { left, right }) => {
+            let note = match report.expected {
+                Some(Expected::Different) => "  (expected)",
+                Some(Expected::Equivalent) => "  (expected equivalent)",
+                None => "",
+            };
+            println!(
+                "{label:<9}{name:<24} different   nix={} austral={}{note}",
+                left.hash, right.hash
+            );
+        }
         Err(e) => println!("[error]  {name:<24} {e}"),
     }
 }
 
 fn json_report(report: &PairReport) -> String {
     let name = json_escape(&report.name);
+    let expected = match report.expected {
+        Some(expected) => format!(",\"expected\":\"{}\"", expected.as_str()),
+        None => String::new(),
+    };
     match &report.verdict {
         Ok(Verdict::Equivalent {
             left,
             right,
             witness_pairs,
         }) => format!(
-            "{{\"name\":\"{name}\",\"verdict\":\"equivalent\",\"witness_pairs\":{witness_pairs},\"nix\":{},\"austral\":{}}}",
+            "{{\"name\":\"{name}\",\"verdict\":\"equivalent\",\"passed\":{}{expected},\"witness_pairs\":{witness_pairs},\"nix\":{},\"austral\":{}}}",
+            report.passed(),
             json_side(left),
             json_side(right)
         ),
         Ok(Verdict::Different { left, right }) => format!(
-            "{{\"name\":\"{name}\",\"verdict\":\"different\",\"nix\":{},\"austral\":{}}}",
+            "{{\"name\":\"{name}\",\"verdict\":\"different\",\"passed\":{}{expected},\"nix\":{},\"austral\":{}}}",
+            report.passed(),
             json_side(left),
             json_side(right)
         ),
         Err(e) => format!(
-            "{{\"name\":\"{name}\",\"verdict\":\"error\",\"error\":\"{}\"}}",
+            "{{\"name\":\"{name}\",\"verdict\":\"error\",\"passed\":false{expected},\"error\":\"{}\"}}",
             json_escape(&e.to_string())
         ),
     }

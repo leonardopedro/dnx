@@ -238,18 +238,48 @@ pub(crate) fn describe_prim(v: &PrimValue) -> String {
 /// ```json
 /// {"pairs": [
 ///   {"name": "arith", "nix": "arith.nix", "austral": "Arith.aum"},
-///   {"nix": "bool.nix", "austral": "Bool.aum"}
+///   {"nix": "bool.nix", "austral": "bool.aum"}
 /// ]}
 /// ```
 ///
 /// Paths are resolved relative to the manifest's directory. `name` is
-/// optional and defaults to the Nix file's stem.
+/// optional and defaults to the Nix file's stem. `expect` is optional and
+/// records the verdict the pair is *required* to have — `"equivalent"` or
+/// `"different"` — so a known-bad translation can stay in a manifest without
+/// making the batch fail.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct PairSpec {
     #[serde(default)]
     pub name: Option<String>,
     pub nix: String,
     pub austral: String,
+    /// Validated by [`load_manifest`] into an [`Expected`].
+    #[serde(default)]
+    pub expect: Option<String>,
+}
+
+/// A verdict a manifest can require for a pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Expected {
+    Equivalent,
+    Different,
+}
+
+impl Expected {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "equivalent" => Some(Self::Equivalent),
+            "different" => Some(Self::Different),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Equivalent => "equivalent",
+            Self::Different => "different",
+        }
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -277,6 +307,17 @@ pub fn load_manifest(path: &std::path::Path) -> Result<Vec<PairSpec>, String> {
         if pair.nix.trim().is_empty() || pair.austral.trim().is_empty() {
             return Err(format!(
                 "manifest {}: pair {} has an empty source path",
+                path.display(),
+                i + 1
+            ));
+        }
+        if let Some(raw) = pair
+            .expect
+            .as_deref()
+            .filter(|raw| Expected::parse(raw).is_none())
+        {
+            return Err(format!(
+                "manifest {}: pair {} has unknown `expect` `{raw}` (use `equivalent` or `different`)",
                 path.display(),
                 i + 1
             ));
@@ -379,14 +420,49 @@ fn collect_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> 
 /// Render a starter manifest for `pairs`, with paths relative to `base` (the
 /// directory the manifest will live in).
 pub fn manifest_json(pairs: &[ScannedPair], base: &std::path::Path) -> String {
+    manifest_json_with_expectations(pairs, base, &std::collections::BTreeMap::new())
+}
+
+/// Like [`manifest_json`], but carries over the `expect` declarations of an
+/// existing manifest at `previous` for pairs that keep their name.
+///
+/// Regenerating a folder's manifest must not silently turn a recorded
+/// known-bad translation back into an expected pass; a name that is gone from
+/// the folder simply drops its declaration, and an unreadable `previous`
+/// contributes nothing.
+pub fn manifest_json_preserving(
+    pairs: &[ScannedPair],
+    base: &std::path::Path,
+    previous: &std::path::Path,
+) -> String {
+    let mut expectations = std::collections::BTreeMap::new();
+    if let Ok(previous_pairs) = load_manifest(previous) {
+        for (index, spec) in previous_pairs.iter().enumerate() {
+            if let Some(expected) = spec.expect.as_deref().and_then(Expected::parse) {
+                expectations.insert(spec_name(spec, index), expected);
+            }
+        }
+    }
+    manifest_json_with_expectations(pairs, base, &expectations)
+}
+
+fn manifest_json_with_expectations(
+    pairs: &[ScannedPair],
+    base: &std::path::Path,
+    expectations: &std::collections::BTreeMap<String, Expected>,
+) -> String {
     let entries: Vec<serde_json::Value> = pairs
         .iter()
         .map(|pair| {
-            serde_json::json!({
+            let mut entry = serde_json::json!({
                 "name": pair.name,
                 "nix": relative_path(base, &pair.nix),
                 "austral": relative_path(base, &pair.austral),
-            })
+            });
+            if let Some(expected) = expectations.get(&pair.name) {
+                entry["expect"] = serde_json::json!(expected.as_str());
+            }
+            entry
         })
         .collect();
     serde_json::to_string_pretty(&serde_json::json!({ "pairs": entries }))
@@ -421,7 +497,41 @@ fn relative_path(base: &std::path::Path, target: &std::path::Path) -> String {
 /// The outcome for one manifest entry.
 pub struct PairReport {
     pub name: String,
+    /// The verdict the manifest required, when it declared one.
+    pub expected: Option<Expected>,
     pub verdict: Result<Verdict, VerifyError>,
+}
+
+impl PairReport {
+    /// Whether the observed verdict is the one the manifest asked for: an
+    /// equivalent verdict when no expectation is declared, otherwise exactly
+    /// the declared one. Errors never pass.
+    pub fn passed(&self) -> bool {
+        match (&self.expected, &self.verdict) {
+            (_, Err(_)) => false,
+            (None, Ok(Verdict::Equivalent { .. })) => true,
+            (Some(Expected::Equivalent), Ok(Verdict::Equivalent { .. })) => true,
+            (Some(Expected::Different), Ok(Verdict::Different { .. })) => true,
+            _ => false,
+        }
+    }
+
+    /// Whether a declared expectation was contradicted by a comparable
+    /// verdict. Errors are reported as errors, not as unmet expectations.
+    pub fn is_unexpected(&self) -> bool {
+        self.expected.is_some() && self.verdict.is_ok() && !self.passed()
+    }
+}
+
+fn spec_name(pair: &PairSpec, index: usize) -> String {
+    pair.name
+        .clone()
+        .or_else(|| {
+            std::path::Path::new(&pair.nix)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| format!("pair {}", index + 1))
 }
 
 /// Check every pair in a manifest, resolving paths against `base`.
@@ -433,15 +543,7 @@ pub fn check_pairs(pairs: &[PairSpec], base: &std::path::Path) -> Vec<PairReport
         .iter()
         .enumerate()
         .map(|(index, pair)| {
-            let name = pair
-                .name
-                .clone()
-                .or_else(|| {
-                    std::path::Path::new(&pair.nix)
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().into_owned())
-                })
-                .unwrap_or_else(|| format!("pair {}", index + 1));
+            let name = spec_name(pair, index);
             let nix_path = resolve_path(base, &pair.nix);
             let austral_path = resolve_path(base, &pair.austral);
             let verdict = (|| {
@@ -452,7 +554,11 @@ pub fn check_pairs(pairs: &[PairSpec], base: &std::path::Path) -> Vec<PairReport
                 })?;
                 check(&nix, &austral)
             })();
-            PairReport { name, verdict }
+            PairReport {
+                name,
+                expected: pair.expect.as_deref().and_then(Expected::parse),
+                verdict,
+            }
         })
         .collect()
 }

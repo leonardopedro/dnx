@@ -45,14 +45,17 @@ verdict without stopping at the first failure:
 ```json
 {
   "pairs": [
-    { "name": "arith", "nix": "arith.nix", "austral": "Arithmetic.aum" },
-    { "nix": "bool.nix", "austral": "Bool.aum" }
+    { "name": "arith", "nix": "arith.nix", "austral": "arith.aum" },
+    { "nix": "bool.nix", "austral": "bool.aum" },
+    { "name": "precedence", "nix": "precedence.nix", "austral": "precedence.aum", "expect": "different" }
   ]
 }
 ```
 
 A bare JSON array is also accepted. Paths resolve relative to the manifest's
-directory; `name` is optional and defaults to the Nix file's stem.
+directory; `name` is optional and defaults to the Nix file's stem. `expect` is
+optional and declares the verdict the pair *must* have: `"equivalent"` (also
+the rule when the field is absent) or `"different"`.
 
 ```
 $ just verify-examples
@@ -60,28 +63,24 @@ $ just verify-examples
 [ok]     apply                    equivalent  2eb771db...d0b4  witness=1
 [ok]     bool                     equivalent  25dfd29c...412a  witness=1
 [ok]     float                    equivalent  c874bca8...6b56  witness=1
-4 pair(s): 4 equivalent, 0 different, 0 error(s)
+[ok]     precedence               different   nix=bf20e9c9...7cb2 austral=7fbc9534...67cc  (expected)
+5 pair(s): 4 equivalent, 1 different, 0 error(s); expectations met
 ```
 
-The examples folder also keeps one deliberately wrong translation in its own
-manifest, `examples/precedence.json`:
+The precedence pair is a deliberately wrong translation. Nix binds `*` before
+`+`, so `1 + 2 * 3` is 7, while the AustralVM expression parser groups left to
+right and reads the same text as `(1 + 2) * 3` — 9. The tool still reports the
+mismatch (`--json` carries both values); what `"expect": "different"` changes
+is that the batch treats it as the required outcome instead of a failure. A
+mismatch with no `expect`, or an `"expect": "equivalent"` that differs, or an
+`"expect": "different"` that matches, is reported `[fail] … (expected …)` and
+makes the batch exit `1`. An unrecognised `expect` value is a manifest error
+(exit `2`).
 
-```
-$ dnx-verify check --manifest crates/dnx-verify/examples/precedence.json
-[fail]   precedence               different   nix=bf20e9c9...7cb2 austral=7fbc9534...67cc
-1 pair(s): 0 equivalent, 1 different, 0 error(s)     # exit 1
-```
-
-Nix binds `*` before `+`, so `1 + 2 * 3` is 7, while the AustralVM expression
-parser groups left to right and reads the same text as `(1 + 2) * 3` — 9.
-`--json` reports both values. This is the schoolbook failure the tool exists to
-catch, kept out of `examples/pairs.json` because that manifest is what
-`just verify-examples` and CI require to pass; a caught failure is a fixture,
-not a passing example.
-
-`--json` emits one object with a `pairs` array and a `summary`. Batch exit
-status aggregates: `2` if any pair could not be compared, else `1` if any pair
-differs, else `0`. Unreadable or malformed manifests are exit `2` before any
+`--json` emits one object with a `pairs` array and a `summary`; each pair
+carries `passed` and, when declared, `expected`. Batch exit status aggregates:
+`2` if any pair could not be compared, else `1` if any pair misses its expected
+verdict, else `0`. Unreadable or malformed manifests are exit `2` before any
 pair is checked. The committed example manifest is
 `crates/dnx-verify/examples/pairs.json`, run by `just verify-examples`;
 `just verify-examples path/to/pairs.json` checks another manifest (the path is
@@ -107,10 +106,17 @@ $ cat translations/pairs.json
 
 Files without a counterpart are reported on stderr (`unpaired …`) but do not
 stop the scan; two Nix entry points for one module stay unpaired rather than one
-being guessed. A folder with no pairs at all is exit `2` and writes nothing.`--output PATH` writes elsewhere (paths become relative to the manifest's new
+being guessed. A folder with no pairs at all is exit `2` and writes nothing.
+`--output PATH` writes elsewhere (paths become relative to the manifest's new
 directory), and `--output -` prints the manifest to stdout with paths relative
-to the working directory. The result is directly usable with
-`check --manifest`, so `dnx-verify scan --dir out && just verify-examples out/pairs.json` is the whole loop — or in one step:
+to the working directory. Regeneration carries over the `expect` declarations
+recorded under the same pair names in the file it replaces, so scanning a
+folder again does not silently downgrade a known-bad translation to a required
+pass; an unreadable previous manifest contributes nothing.
+
+The result is directly usable with `check --manifest`, so
+`dnx-verify scan --dir out && just verify-examples out/pairs.json` is the whole
+loop — or in one step:
 
 ```bash
 $ just scan out                  # scan, then check every pair
@@ -118,7 +124,10 @@ $ just scan out no               # only write out/pairs.json
 ```
 
 `just scan`'s arguments are positional; `just scan out CHECK=no` would be read
-by `just` as a variable override, not as the recipe's second argument.
+by `just` as a variable override, not as the recipe's second argument. The
+committed examples are stem-paired, so `just scan crates/dnx-verify/examples`
+regenerates the shipped manifest (keeping `precedence`'s expectation) and
+checks all five pairs.
 
 ## Structural checks over entities
 
@@ -243,9 +252,12 @@ Covered: closed arithmetic equivalence, expression-vs-literal normal forms,
 booleans, floats, a genuine mismatch, the committed precedence fixture staying
 a mismatch (Nix 7 vs AustralVM 9), unsupported strings, module `main`
 comparison, hash stability, manifest parsing/aggregation (including CLI exit
-codes), entity-bearing structural checks (including entity-name mismatches and
-the CLI's `entities=` output), folder scanning plus a generated manifest that
-round-trips through batch mode, and that the committed example manifest passes. The `Abs`/`App`/`Dup`/`Era` port mapping is
+codes and expected verdicts: a declared mismatch passes, an unmet expectation
+and an unknown `expect` both fail), entity-bearing structural checks (including
+entity-name mismatches and the CLI's `entities=` output), folder scanning plus a
+generated manifest that round-trips through batch mode, regeneration preserving
+recorded expectations, and that the committed example manifest meets all five
+of its expectations. The `Abs`/`App`/`Dup`/`Era` port mapping is
 pinned against **hand-built kernel nets** for `x: y: x`, `f: x: f x` and
 `x: x x`, so the converter is checked against the kernel's own encoding rather
 than against a second call to itself.
