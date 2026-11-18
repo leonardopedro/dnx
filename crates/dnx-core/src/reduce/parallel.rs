@@ -83,14 +83,17 @@ impl WorkerOutput {
     }
 }
 
-/// Slots a worker output writes: retired agents, newly committed agents, and both
-/// ends of every wire (wiring a port updates that port's field), plus the ports
-/// eraser propagation marks. Two outputs sharing any of these cannot be applied
-/// from the same pre-batch snapshot.
+/// Slots a worker output writes: retired agents, newly committed agents, whole-slot
+/// mutations (C2 shifts `rep_b`'s level/deltas), and both ends of every wire
+/// (wiring a port updates that port's field), plus the ports eraser propagation
+/// marks. Two outputs sharing any of these cannot be applied from the same
+/// pre-batch snapshot.
 fn touched_slots(out: &WorkerOutput, base: u32) -> Vec<u32> {
-    let mut slots: Vec<u32> = Vec::with_capacity(out.retired.len() + out.new_agents.len() + 16);
+    let mut slots: Vec<u32> =
+        Vec::with_capacity(out.retired.len() + out.new_agents.len() + out.slot_muts.len() + 16);
     slots.extend(out.retired.iter().copied());
     slots.extend(base..base + out.new_agents.len() as u32);
+    slots.extend(out.slot_muts.iter().map(|(idx, _)| *idx));
     let push_port = |p: PortId, slots: &mut Vec<u32>| {
         if !p.is_eraser() && !p.is_null() {
             slots.push(p.slot_idx());
