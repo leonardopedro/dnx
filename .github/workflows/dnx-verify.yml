@@ -1,0 +1,51 @@
+name: dnx-verify
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/dnx-verify/**"
+      - "crates/dnx-core/**"
+      - "crates/dnx-lang/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Justfile"
+      - ".github/workflows/dnx-verify.yml"
+  pull_request:
+    paths:
+      - "crates/dnx-verify/**"
+      - "crates/dnx-core/**"
+      - "crates/dnx-lang/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Justfile"
+      - ".github/workflows/dnx-verify.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: dnx-verify
+    runs-on: ubuntu-latest
+    steps:
+      # dnx-verify hashes with the kernel's own serializer, so the `logos`
+      # crate must sit beside the dnx checkout at the path its Cargo.toml
+      # names (`../../../unfer/logos` from crates/dnx-verify).
+      - uses: actions/checkout@v6
+        with:
+          path: dnx
+      - uses: actions/checkout@v6
+        with:
+          repository: leonardopedro/unfer
+          path: unfer
+          token: ${{ secrets.UNFER_TOKEN || github.token }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: extractions/setup-just@v2
+      - name: Unit and integration tests
+        working-directory: dnx
+        run: cargo test -p dnx-verify
+      - name: Example pairs
+        working-directory: dnx
+        run: just verify-examples

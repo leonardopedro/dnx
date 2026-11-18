@@ -188,6 +188,34 @@ impl NixRuntime {
         Ok((readback_result(&canonical, &prim_state), stats.interactions))
     }
 
+    /// Evaluate `src` to a fully normalized DeltaNet and return the canonical
+    /// net, its primitive side table, and the root port.
+    ///
+    /// This is the graph-level entry point for `dnx-verify`: unlike
+    /// [`eval_canonical`](Self::eval_canonical) it keeps the reduced net so a
+    /// caller can export it and compare it against another DeltaNet. Full
+    /// normalization is the same `normalize_demand` path, so the returned net
+    /// is the unique normal form (when the demand-driven reduction terminates
+    /// inside the fuel budget).
+    pub fn eval_net(
+        &self,
+        src: &str,
+    ) -> Result<(Net<Canonical, ΔK>, PrimState, PortId), NixEvalError> {
+        let (net, mut prim_state, _) = self.build_net(src, None)?;
+        let cfg = NormalizeConfig {
+            max_steps: Some(50_000_000),
+            max_agents: Some((1 << 16) - 16),
+        };
+        let root = net
+            .roots()
+            .get("r")
+            .copied()
+            .ok_or_else(|| NixEvalError::Readback("no root".into()))?;
+        let (canonical, _) =
+            normalize_demand(net, &mut prim_state, root, &cfg).map_err(NixEvalError::Elaborate)?;
+        Ok((canonical, prim_state, root))
+    }
+
     fn eval_with_base(&self, src: &str, base: Option<std::path::PathBuf>) -> NixEvalResult {
         let (mut net, mut prim_state, root_port) = match self.build_net(src, base) {
             Ok(t) => t,

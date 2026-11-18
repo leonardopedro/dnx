@@ -19,6 +19,11 @@ docs-build:
 test:
   @cargo test
 
+# Verify the Nix/AustralVM example pairs in a batch manifest (default: the
+# in-fragment examples shipped with dnx-verify).
+verify-examples MANIFEST='crates/dnx-verify/examples/pairs.json':
+  @cargo run -q -p dnx-verify -- check --manifest {{MANIFEST}}
+
 oracle:
   @cargo test --test oracle -- --include-ignored
   @cargo test -p dnx-sched --test parallel_equiv -- --include-ignored

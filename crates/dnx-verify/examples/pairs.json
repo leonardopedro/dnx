@@ -1,0 +1,8 @@
+{
+  "pairs": [
+    { "name": "arith", "nix": "arith.nix", "austral": "Arithmetic.aum" },
+    { "name": "apply", "nix": "apply.nix", "austral": "Apply.aum" },
+    { "name": "bool", "nix": "bool.nix", "austral": "Bool.aum" },
+    { "name": "float", "nix": "float.nix", "austral": "Float.aum" }
+  ]
+}

@@ -109,11 +109,29 @@ impl SlotView {
     pub fn is_prim(self) -> bool {
         (self.tag & 0x0E) == 0x0C
     }
+    pub fn is_prim_val(self) -> bool {
+        (self.tag & 0x0F) == 0x0C
+    }
+    pub fn is_prim_fun(self) -> bool {
+        (self.tag & 0x0F) == 0x0D
+    }
     pub fn fan_is_abs(self) -> bool {
         (self.tag & 0x01) != 0
     }
     pub fn free_var_id(self) -> u16 {
         self.data & 0x3FFF
+    }
+    pub fn rep_is_in(self) -> bool {
+        (self.tag & 0x01) == 0
+    }
+    pub fn rep_is_unpaired(self) -> bool {
+        (self.tag & 0x02) == 0
+    }
+    pub fn rep_aux0_erased(self) -> bool {
+        (self.tag & 0x40) != 0
+    }
+    pub fn rep_aux1_erased(self) -> bool {
+        (self.tag & 0x80) != 0
     }
 }
 
@@ -149,6 +167,29 @@ impl<S: NetState, C: NetClassMarker> Net<S, C> {
     /// Root ports (free variables / named outputs from add_root).
     pub fn roots(&self) -> &std::collections::HashMap<Arc<str>, PortId> {
         &self.free_slots
+    }
+
+    /// Indices of committed, live agent slots. For external graph export
+    /// (`dnx-verify`): the indices are not dense and include no retired slots.
+    pub fn live_agent_indices(&self) -> Vec<u32> {
+        self.arena.live().to_vec()
+    }
+
+    /// Slot view at a raw slot index, or `None` if that slot is not live.
+    pub fn slot_view_at(&self, idx: u32) -> Option<SlotView> {
+        if !self.arena.is_live(idx) {
+            return None;
+        }
+        let s = self.arena.slot(idx);
+        Some(SlotView {
+            tag: s.tag,
+            principal: s.principal,
+            aux0: s.aux0,
+            aux1: s.aux1,
+            data: s.data,
+            delta0: s.delta0,
+            delta1: s.delta1,
+        })
     }
 
     pub fn slot_is_live(&self, port: PortId) -> bool {
