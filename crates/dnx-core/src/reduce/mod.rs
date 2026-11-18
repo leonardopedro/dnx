@@ -98,7 +98,7 @@ pub fn normalize<C: CRules>(
     let mut stats = ReduceStats::default();
 
     while let Some((_, pair)) = net.frontier1.pop_first() {
-        if is_stale_pair(&pair, &net) {
+        if is_stale_pair(&pair, &net) || is_free_wire_pair(&pair, &net) {
             continue;
         }
         stats.interactions += 1;
@@ -349,7 +349,7 @@ pub fn normalize_with_prims<C: CRules>(
     let cfg = crate::NormalizeConfig::default();
 
     while let Some((_, pair)) = net.frontier1.pop_first() {
-        if is_stale_pair(&pair, &net) {
+        if is_stale_pair(&pair, &net) || is_free_wire_pair(&pair, &net) {
             continue;
         }
         stats.interactions += 1;
@@ -378,7 +378,7 @@ pub fn normalize_demand<C: CRules>(
     let mut stats = ReduceStats::default();
     let mut steps = 0u64;
     while let Some((_, pair)) = net.frontier1.pop_first() {
-        if is_stale_pair(&pair, &net) {
+        if is_stale_pair(&pair, &net) || is_free_wire_pair(&pair, &net) {
             continue;
         }
         steps += 1;
@@ -397,6 +397,19 @@ pub fn normalize_demand<C: CRules>(
 
 pub(crate) fn is_stale_pair<C: NetClassMarker>(pair: &ActivePair, net: &Net<Proper, C>) -> bool {
     !port_live(pair.p0.get(), net) || !port_live(pair.p1.get(), net)
+}
+
+/// A principal pair touching a whole free slot is a wire endpoint (a variable or
+/// the root), not an agent: no interaction rule applies and nothing is consumed.
+/// R4 in particular cross-wires a beta body straight to the root free slot, and
+/// such a pair must not be counted as an interaction nor wedge the frontier.
+pub(crate) fn is_free_wire_pair<C: NetClassMarker>(
+    pair: &ActivePair,
+    net: &Net<Proper, C>,
+) -> bool {
+    let is_free =
+        |p: PortId| !p.is_eraser() && !p.is_null() && net.arena.slot(p.slot_idx()).is_free();
+    is_free(pair.p0.get()) || is_free(pair.p1.get())
 }
 
 pub(crate) fn is_stale_c4<C: NetClassMarker>(cand: &C4Candidate, net: &Net<Proper, C>) -> bool {
@@ -487,6 +500,14 @@ fn dispatch_phase1<C: CRules>(
 
     let s0 = *net.arena.slot(p0.slot_idx());
     let s1 = *net.arena.slot(p1.slot_idx());
+
+    // A free slot is a variable/root wire, not an agent: its principal port is a
+    // wire endpoint, so facing an agent principal is not a redex (no rule exists).
+    // R4 in particular wires a beta body straight to the root free slot, and that
+    // wire must simply be left alone rather than reported as unreadable.
+    if s0.is_free() || s1.is_free() {
+        return Ok(());
+    }
 
     match (s0.is_fan(), s0.is_rep(), s1.is_fan(), s1.is_rep()) {
         (true, _, true, _) => {

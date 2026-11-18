@@ -8,7 +8,10 @@
 ///   LO = normal order → reaches WHNF iff a WHNF exists (head normalization).
 ///   Perfect confluence (§2) → WHNF is unique regardless of order.
 ///   Optimality (§4) → no redex fired that WHNF does not need.
-use super::{dispatch_phase1, drain_phase2, is_stale_pair, step_with_prims, CRules, ReduceStats};
+use super::{
+    dispatch_phase1, drain_phase2, is_free_wire_pair, is_stale_pair, step_with_prims, CRules,
+    ReduceStats,
+};
 use crate::net::{ActivePair, Net};
 use crate::prim::PrimState;
 use crate::{DnxError, PortId, PortKind, Proper};
@@ -65,7 +68,11 @@ pub fn force_whnf<C: CRules>(
                 // frontier1 empty — head is head-normal but not a value (Stuck)
                 return Ok(ValueHead::Stuck(head));
             };
-            if !is_stale_pair(&candidate, net) {
+            // A principal pair touching a whole free slot is a wire endpoint
+            // (variable or root), not a redex: no rule fires. Popping it is
+            // correct either way, but skipping it here keeps it from spending
+            // `max_steps` fuel on a step that reduces nothing.
+            if !is_stale_pair(&candidate, net) && !is_free_wire_pair(&candidate, net) {
                 break candidate;
             }
         };

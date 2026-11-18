@@ -145,6 +145,11 @@ fn ref_nf(e: &E) -> Result<E, RefErr> {
 
 /// `pass1 → elaborate → normalize → psi_native`. Errors propagate (no unwrap).
 fn dnx_nf(expr: &E) -> Result<E, DnxError> {
+    dnx_nf_stats(expr).map(|(ast, _)| ast)
+}
+
+/// As `dnx_nf`, also returning the reducer's stats.
+fn dnx_nf_stats(expr: &E) -> Result<(E, dnx_core::ReduceStats), DnxError> {
     let r1 = dnx_elab::pass1(expr)?;
     let mut net = Net::<Proper, ΔL>::new(256);
     let mut env = Env::new();
@@ -164,9 +169,9 @@ fn dnx_nf(expr: &E) -> Result<E, DnxError> {
         slot
     };
     net.add_root("r".into(), root);
-    let (canonical, _) = normalize(net)?;
+    let (canonical, stats) = normalize(net)?;
     match dnx_read::psi_native::<ΔL, NoVal, NoFun>(&canonical) {
-        dnx_read::ReadbackResult::Lambda(ast) => Ok(ast),
+        dnx_read::ReadbackResult::Lambda(ast) => Ok((ast, stats)),
         dnx_read::ReadbackResult::Partial(_) => Err(DnxError::ReadbackIncomplete),
     }
 }
@@ -305,6 +310,27 @@ fn diag_partial_app() -> Result<(), DnxError> {
     Ok(())
 }
 
+/// Regression: R4 (β) cross-wires a body's principal straight to the open root
+/// free slot. The resulting principal⊗free-slot pair is a wire endpoint, not a
+/// redex, so no rule applies — it must be skipped quietly (complete readback)
+/// instead of reaching `dispatch_phase1`'s catch-all as `ReadbackIncomplete`,
+/// and it must not be counted as an interaction.
+#[test]
+fn beta_body_wired_to_root_free_slot_normalizes() -> Result<(), String> {
+    // (λf.λx.f x) I  →β  λx. I x  →β  λx.x ; the inner β wires I's body directly
+    // to the root free slot.
+    let s = ab("f", ab("x", ap(nm("f"), nm("x"))));
+    let term = ap(s, ab("y", nm("y")));
+    let reference = ref_nf(&term).map_err(|e| format!("ref rejected closed term: {e:?}"))?;
+    let (dnx, stats) = dnx_nf_stats(&term).map_err(|e| format!("dnx failed: {e:?}"))?;
+    assert!(alpha_eq(&dnx, &reference), "dnx={dnx:?} ref={reference:?}");
+    // Two β-steps and nothing else: the free-slot wire pair contributes no
+    // interaction (with the bug it was counted, making three).
+    assert_eq!(stats.interactions, 2, "stats={stats:?}");
+    assert_eq!(stats.r4_count, 2, "stats={stats:?}");
+    Ok(())
+}
+
 #[test]
 fn smoke_bridge_matches_ref() -> Result<(), String> {
     // (λf.λx. f x)(λy.y)(λz.z)  →β  λz.z
@@ -325,72 +351,112 @@ fn corpus_bridge_matches_ref() -> Result<(), String> {
 // ── D2 differential fuzz: generated LINEAR closed λ-terms ──────────────────────
 //
 // The generator emits terms in the admissible fragment (pass1.rs:78-83): closed,
-// every binder used EXACTLY once. `gen_using(vars, size)` produces a term whose
-// free variables are precisely the set `vars`, each occurring once:
-//   • |vars|==1, small  → that variable (leaf, consumes it);
-//   • Abs               → bind a fresh name, body must use `vars ∪ {fresh}`;
-//   • App(f,x)          → DISJOINT split `vars = Sf ⊎ Sx` (linearity: no overlap).
-// The whole term is generated with `vars = ∅` ⇒ closed. The reference normalizer
-// guards the net: a term with no NF (ref Diverged) is discarded, so the net is
-// only driven on guaranteed-normalizing input and cannot hang.
+// every binder used EXACTLY once. `build` produces a term whose free variables
+// are precisely `vars`, each occurring once:
+//   • |vars|==1  → that variable (leaf, consumes it);
+//   • Abs        → bind a fresh name, body must use `vars ∪ {fresh}`;
+//   • App(f,x)   → DISJOINT split `vars = Sf ⊎ Sx` (linearity: no overlap).
+// The whole term starts with `vars = ∅` ⇒ closed. `budget` is the number of
+// structural nodes the term may add; it strictly decreases on every recursive
+// step (an App at zero budget bisects the variables instead and needs no budget,
+// so leaves are always reachable). The term is built from a fixed bit tape rather
+// than a recursive strategy, so construction cannot recurse before sampling and
+// the size budget is respected. The reference normalizer guards the net: a term
+// with no NF (ref Diverged) is discarded, so the net is only driven on
+// guaranteed-normalizing input and cannot hang.
 
 use proptest::prelude::*;
 
-/// Random disjoint partition of `vars` into (left, right).
-fn split(vars: &[Arc<str>]) -> impl Strategy<Value = (Vec<Arc<str>>, Vec<Arc<str>>)> {
-    let v = vars.to_vec();
-    proptest::collection::vec(any::<bool>(), v.len()).prop_map(move |mask| {
-        let mut l = Vec::new();
-        let mut r = Vec::new();
-        for (keep_left, name) in mask.iter().zip(v.iter()) {
-            if *keep_left {
-                l.push(name.clone());
-            } else {
-                r.push(name.clone());
-            }
-        }
-        (l, r)
-    })
+fn next_bit(tape: &mut impl Iterator<Item = bool>) -> bool {
+    tape.next().unwrap_or(false)
 }
 
-fn gen_using(vars: Vec<Arc<str>>, fresh: u32, size: u32) -> BoxedStrategy<E> {
-    // Leaf only possible when exactly one variable remains to be consumed.
-    if size == 0 && vars.len() == 1 {
-        let only = vars[0].clone();
-        return Just(Ast::Name(only)).boxed();
-    }
-    let fname: Arc<str> = Arc::from(format!("g{fresh}").as_str());
-    // Abs: introduce `fname`, body consumes vars ∪ {fname}.
-    let abs = {
-        let mut inner = vars.clone();
-        inner.push(fname.clone());
-        let fn_for_map = fname.clone();
-        gen_using(inner, fresh + 1, size.saturating_sub(1))
-            .prop_map(move |body| Ast::Abs(fn_for_map.clone(), Box::new(body)))
+fn take_bits(tape: &mut impl Iterator<Item = bool>, n: u32) -> u32 {
+    (0..n).fold(0, |acc, _| (acc << 1) | u32::from(next_bit(tape)))
+}
+
+fn fresh_name(fresh: &mut u32) -> Arc<str> {
+    let name: Arc<str> = Arc::from(format!("g{fresh}").as_str());
+    *fresh += 1;
+    name
+}
+
+/// Disjoint partition of `vars`: with `proper`, both sides are non-empty (an App
+/// at zero budget relies on this, since it cannot spend budget to split again).
+fn partition(
+    vars: &mut Vec<Arc<str>>,
+    tape: &mut impl Iterator<Item = bool>,
+    proper: bool,
+) -> (Vec<Arc<str>>, Vec<Arc<str>>) {
+    let n = vars.len();
+    let k = if proper {
+        1 + (take_bits(tape, 8) as usize) % (n - 1)
+    } else {
+        (take_bits(tape, 8) as usize) % (n + 1)
     };
-    // App: split vars disjointly between the two children.
-    let app = {
-        let vs = vars.clone();
-        split(&vars).prop_flat_map(move |(sl, sr)| {
-            let half = size / 2;
-            let _ = &vs;
-            (
-                gen_using(sl, fresh + 1, half),
-                gen_using(sr, fresh + 1000, half),
-            )
-                .prop_map(|(f, x)| Ast::App(Box::new(f), Box::new(x)))
-        })
-    };
-    match (vars.len(), size) {
-        // Nothing to consume: only an Abs (which binds+uses) keeps it linear+closed.
-        (0, _) => abs.boxed(),
-        // One var, but still have budget: leaf or wrap.
-        (1, _) => {
-            prop_oneof![2 => Just(Ast::Name(vars[0].clone())).boxed(), 1 => abs, 1 => app].boxed()
+    let right = vars.split_off(k);
+    (std::mem::take(vars), right)
+}
+
+fn build(
+    vars: &mut Vec<Arc<str>>,
+    fresh: &mut u32,
+    budget: u32,
+    tape: &mut impl Iterator<Item = bool>,
+) -> E {
+    match vars.len() {
+        // Nothing to consume: only an Abs (which binds and uses its variable)
+        // keeps the term linear and closed. This adds no free variables.
+        0 => {
+            let f = fresh_name(fresh);
+            Ast::Abs(f.clone(), Box::new(Ast::Name(f)))
         }
-        // Many vars: must distribute them — App, or bind one more under an Abs.
-        _ => prop_oneof![3 => app, 1 => abs].boxed(),
+        // One variable left and no budget: it must be consumed as a leaf.
+        1 if budget == 0 => Ast::Name(vars.pop().expect("one variable")),
+        // One variable left with budget: leaf, bind one more under it, or apply.
+        1 => match take_bits(tape, 2) {
+            0 => Ast::Name(vars.pop().expect("one variable")),
+            1 => {
+                let f = fresh_name(fresh);
+                vars.push(f.clone());
+                let body = build(vars, fresh, budget - 1, tape);
+                Ast::Abs(f, Box::new(body))
+            }
+            _ => {
+                let (mut l, mut r) = partition(vars, tape, false);
+                let half = budget.saturating_sub(1) / 2;
+                let f = build(&mut l, fresh, half, tape);
+                let x = build(&mut r, fresh, half, tape);
+                Ast::App(Box::new(f), Box::new(x))
+            }
+        },
+        // Several variables: they have to be distributed by an App; with budget
+        // left one of them may be bound under an Abs instead.
+        _ => {
+            let bind = budget > 0 && take_bits(tape, 2) == 0;
+            if bind {
+                let f = fresh_name(fresh);
+                vars.push(f.clone());
+                let body = build(vars, fresh, budget - 1, tape);
+                Ast::Abs(f, Box::new(body))
+            } else {
+                let (mut l, mut r) = partition(vars, tape, budget == 0);
+                let half = budget.saturating_sub(1) / 2;
+                let f = build(&mut l, fresh, half, tape);
+                let x = build(&mut r, fresh, half, tape);
+                Ast::App(Box::new(f), Box::new(x))
+            }
+        }
     }
+}
+
+/// Strategy: a random bit tape, decoded into a linear closed term.
+fn gen_term(budget: u32) -> impl Strategy<Value = E> {
+    proptest::collection::vec(any::<bool>(), 512).prop_map(move |bits| {
+        let mut tape = bits.into_iter();
+        let mut fresh = 0;
+        build(&mut Vec::new(), &mut fresh, budget, &mut tape)
+    })
 }
 
 proptest! {
@@ -399,7 +465,7 @@ proptest! {
     /// dnx-normalize ≡ ref-normalize on every generated LINEAR closed term that
     /// has a normal form. This is the A1 (φ_S-idempotency) differential oracle.
     #[test]
-    fn dnx_normalize_eq_ref_normalize(term in gen_using(Vec::new(), 0, 6)) {
+    fn dnx_normalize_eq_ref_normalize(term in gen_term(6)) {
         match agree(&term) {
             Ok(_) => {}                         // agreed, or ref had no NF (skipped)
             Err(msg) => prop_assert!(false, "{}", msg),

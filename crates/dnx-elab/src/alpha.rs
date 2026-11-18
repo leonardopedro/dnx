@@ -44,9 +44,7 @@ fn rename<V: PrimVal + Clone, F: PrimFun + Clone>(
             let env2 = bind(&bind(env, a, &a2), b, &b2);
             Ast::Rep(Box::new(e2), a2, b2, Box::new(rename(body, &env2)))
         }
-        Ast::Era(e, body) => {
-            Ast::Era(Box::new(rename(e, env)), Box::new(rename(body, env)))
-        }
+        Ast::Era(e, body) => Ast::Era(Box::new(rename(e, env)), Box::new(rename(body, env))),
         Ast::Fix(inner) => Ast::Fix(Box::new(rename(inner, env))),
         Ast::Perform(label, e) => Ast::Perform(label.clone(), Box::new(rename(e, env))),
         Ast::Handle(comp, branches) => {
